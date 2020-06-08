@@ -1,0 +1,369 @@
+---
+title: "Habitat complexity part 4: comparing structural metrics between sponges and corals"
+author: "Alberto Rovellini"
+date: "18 March 2020"
+output:
+  html_document:
+    code_folding: hide
+    toc: yes
+    toc_float: yes
+  pdf_document:
+    toc: yes
+---
+
+This document explores the distribution of the model-derived complexity metrics, and the relationships between them. It then models differences betwwen high- and low-complexity quadrats, and between coral-dominated and sponge-dominated quadrats.
+
+```{r, echo = FALSE, include=FALSE, warning = FALSE}
+knitr::opts_chunk$set(echo = TRUE, width = 150)
+```
+
+```{r, message = FALSE, warning = FALSE}
+
+library(data.table)
+library(ggplot2)
+library(abind)
+library(dplyr)
+library(reshape2)
+library(emmeans)
+library(ggfortify)
+library(nlme)
+library(betareg)
+library(scales)
+
+```
+
+Read in cover
+
+```{r}
+
+cover <- read.csv(".../coverNew.csv")
+
+```
+
+Merge in results of the 3D models
+
+```{r}
+
+hcx <- read.csv(".../hcxNew.csv")
+
+hcx.add <- hcx %>% dplyr::select(Rugosity.AV:lnS6)
+n.times <- length(levels(droplevels(cover$Long_group))) # find number of times one row og hcx must be replicated to fit with cover
+
+hcx.add <- hcx.add[rep(seq_len(nrow(hcx.add)), each = n.times),] # inflate hcx
+
+cover <- cbind(cover, hcx.add) # stitch
+
+hcx.all <- hcx
+
+```
+
+# Analysis
+
+## Distribution of the metrics
+
+See how the metrics are distributed to get a better sense of what model is appropriate.
+
+```{r}
+
+distros <- hcx.all %>% dplyr::select(
+  Bottom, Rugosity.AV, K.AV, F1:F5
+)
+
+distros.plot <- melt(distros, id.vars = "Bottom")
+
+ggplot(data = distros.plot, aes(x = value))+
+  geom_density()+
+  theme_bw()+
+  theme(panel.grid = element_blank())+
+  facet_wrap(~ variable, scales = "free")
+
+```
+
+## Changes of properties between benthic types and categories of complexity
+
+The below is still based on cluster-based complexity categories. 
+
+###Rugosity
+
+See if rugosity changes between categories of complexity and between type of benthos.
+
+```{r, fig.width = 3.5, fig.height = 3.5}
+
+hcx.all$Complexity <- factor(hcx.all$Complexity, levels = c("L", "H"))
+
+ggplot(data = hcx.all, aes(x = Complexity, y = Rugosity.AV))+
+  geom_boxplot(aes(fill = Bottom, color = Bottom), alpha = 0.7, width = 0.5)+  
+  scale_fill_manual(values = c("firebrick", "dodgerblue"))+
+  scale_color_manual(values = c("firebrick", "dodgerblue"))+
+  labs(y = expression(italic("R")))+
+  theme_bw()+
+  theme(panel.grid = element_blank())
+
+```
+
+Boxplot shows different values of rugosity between complexity categories. Perhaps not between different groups at the same level of complexity. Model R with a beta regression (see main text).
+
+```{r, fig.width = 8, fig.height = 3}
+
+r.beta <- betareg(data = hcx.all, Rugosity.AV ~ Complexity * Bottom, link = "logit") # beta regression
+
+r.model <- r.beta
+
+summary(r.model)
+
+# residuals
+
+par(mfrow = c(1, 3)) 
+plot(resid(r.model)) 
+hist(resid(r.model))
+qqnorm(resid(r.model))
+qqline(resid(r.model))
+
+# post hoc
+
+summary(emmeans(r.model, pairwise ~ Bottom | Complexity ), adjust = "bonferroni")
+summary(emmeans(r.model, pairwise ~ Complexity | Bottom ), adjust = "bonferroni")
+
+```
+
+Rugosity is different between sponges and corals at low complexities (p = 0.0011), but it is not at high complexity (0.8528). For both corals and sponges, *R* is different between high and low complexity quadrats (p <.0001 and p = 0.0072 for corals and sponges respectively). These are from a beta regression.
+
+### Vector dispersion
+
+Same as above with vector dispersion. It has a normal-like distribution, so we can use linear models.
+
+```{r, fig.width = 3.5, fig.height = 3.5}
+
+ggplot(data = hcx.all, aes(x = Complexity, y = K.AV))+
+  geom_boxplot(aes(fill = Bottom, color = Bottom), alpha = 0.7, width = 0.5)+  
+  scale_fill_manual(values = c("firebrick", "dodgerblue"))+
+  scale_color_manual(values = c("firebrick", "dodgerblue"))+
+  labs(y = expression(paste("1/", italic("k"), sep = "")))+
+  theme_bw()+
+  theme(panel.grid = element_blank())
+
+```
+
+Potentially some differences between corals and sponges. Surely different between complexity levels. 
+
+```{r, fig.width = 8, fig.height = 3}
+
+k.beta <- betareg(data = hcx.all, K.AV ~ Complexity * Bottom, link = "logit") # for 0-1 data
+
+k.model <- k.beta
+
+summary(k.model)
+
+# residuals
+
+par(mfrow = c(1, 3)) 
+plot(resid(k.model)) 
+hist(residuals(k.model))
+qqnorm(residuals(k.model))
+qqline(residuals(k.model))
+
+# post hoc
+
+summary(emmeans(k.model, pairwise ~ Bottom | Complexity ), adjust = "bonferroni")
+summary(emmeans(k.model, pairwise ~ Complexity | Bottom ), adjust = "bonferroni")
+
+```
+
+At low complexity, sponge-dominated quadrats have higher 1/*k* than coral-dominated quadrats (p = 0.0002). At high complexity, they are the same (p = 0.3429). 1/*k* increases for corals at high complexity (p <.0001), and also for sponges (0.0494). 
+
+###Fractal dimension
+
+Metrics *D*~1~, *D*~2~, *D*~5~ have a right-skewed distribution. Use generalised linear models glm() with Gamma-distributed errors (inverse link) for these, and gaussian errors (equivalent to ordinary linear models). 
+
+```{r, fig.width = 6, fig.height = 5}
+
+D <- hcx.all %>% dplyr::select(
+  Bottom, Complexity, F1:F5
+)
+
+D.plot <- melt(D, id.vars = list("Bottom", "Complexity"))
+
+ggplot(data = D.plot, aes(x = Complexity, y = value))+
+  geom_boxplot(aes(fill = Bottom, color = Bottom), alpha = 0.7, width = 0.5)+  
+  scale_fill_manual(values = c("firebrick", "dodgerblue"))+
+  scale_color_manual(values = c("firebrick", "dodgerblue"))+
+  labs(y = expression(paste(italic("D"), sep = "")))+
+  theme_bw()+
+  theme(panel.grid = element_blank())+
+  facet_wrap(~ variable, scales = "free")+
+  theme(strip.background = element_blank())
+  
+```
+
+*D*~1~
+
+Gamma GLM with log link
+
+```{r, fig.width = 8, fig.height = 3}
+
+D1.gamma.log <- glm(data = hcx.all, F1 ~ Complexity * Bottom, family = Gamma(link = "log")) # glm with log link
+
+D1.model <- D1.gamma.log
+
+summary(D1.model)
+
+# residuals
+
+par(mfrow = c(1, 3)) 
+plot(resid(D1.model)) 
+hist(residuals(D1.model))
+qqnorm(residuals(D1.model))
+qqline(residuals(D1.model))
+
+# post hoc
+
+summary(emmeans(D1.model, pairwise ~ Bottom | Complexity ), adjust = "bonferroni")
+summary(emmeans(D1.model, pairwise ~ Complexity | Bottom ), adjust = "bonferroni")
+
+```
+
+No difference between sponge and coral quadrats at either complexity level. For sponges, a difference between low complexity and high complexity (p = 0.0039), but not for corals. Quadrats with high sponge complexity are defined by barrels and tubes (see RDA), and those large structures provide large refuge spaces. No difference for corals. This is a Gamma regression.
+
+*D*~2~
+
+Gamma GLM with log link
+
+```{r, fig.width = 8, fig.height = 3}
+
+D2.gamma.log <- glm(data = hcx.all, F2 ~ Complexity * Bottom, family = Gamma(link = "log")) # glm with log link
+
+D2.model <- D2.gamma.log
+
+summary(D2.model)
+
+# residuals
+
+par(mfrow = c(1, 3)) 
+plot(resid(D2.model)) 
+hist(residuals(D2.model))
+qqnorm(residuals(D2.model))
+qqline(residuals(D2.model))
+
+# post hoc
+
+summary(emmeans(D2.model, pairwise ~ Bottom | Complexity ), adjust = "bonferroni")
+summary(emmeans(D2.model, pairwise ~ Complexity | Bottom ), adjust = "bonferroni")
+
+```
+
+Difference between sponge and coral-dominated quadrats at high complexity, with sponges having higher values of *D*~2~ than corals (p = 0.0056). No difference at low complexity (p = 0.8599). No difference between high and low complexity coral quadrats (p = 0.8227), but difference for sponges (p = 0.0015). Again, sponge-dominated quadrats with high structural complexity have high values of this metric, that denotes large refuge holes. 
+
+*D*~3~
+
+GLM with gaussian errors
+
+```{r, fig.width = 8, fig.height = 3}
+
+D3.norm <- glm(data = hcx.all, F3 ~ Complexity * Bottom, family = gaussian) # linear model
+
+D3.model <- D3.norm
+
+summary(D3.model)
+
+# residuals
+
+par(mfrow = c(1, 3)) 
+plot(resid(D3.model)) 
+hist(residuals(D3.model))
+qqnorm(residuals(D3.model))
+qqline(residuals(D3.model))
+
+# post hoc
+
+summary(emmeans(D3.model, pairwise ~ Bottom | Complexity ), adjust = "bonferroni")
+summary(emmeans(D3.model, pairwise ~ Complexity | Bottom ), adjust = "bonferroni")
+
+```
+
+Difference between corals and sponges at low complexity (p = 0.0030), with sponges having a much higher value. No difference between sponges and corals at high complexity (p = 0.0997). For corals, there is a difference between high and low complexity quadrats (p <.0001), whereas no difference between sponges (p = 0.1129). Mind that there is a big outlier here, of a high-complexity coral quadrat that has a low value of *D*~3~. 
+
+*D*~4~
+
+GLM with gaussian errors
+
+```{r, fig.width = 8, fig.height = 3}
+
+D4.norm <- glm(data = hcx.all, F4 ~ Complexity * Bottom, family = gaussian) 
+
+D4.model <- D4.norm
+
+summary(D4.model)
+
+# residuals
+
+par(mfrow = c(1, 3)) 
+plot(resid(D4.model)) 
+hist(residuals(D4.model))
+qqnorm(residuals(D4.model))
+qqline(residuals(D4.model))
+
+# post hoc
+
+summary(emmeans(D4.model, pairwise ~ Bottom | Complexity ), adjust = "bonferroni")
+summary(emmeans(D4.model, pairwise ~ Complexity | Bottom ), adjust = "bonferroni")
+
+```
+
+Similarly to *D*~3~, at low complexity sponge-dominated quadrats have higher values of *D*~4~ than coral-dominated quadrats (p = 0.0058), but at high complexity corals and sponges are the same (p = 0.1635). For corals, the metric increases from low to high complexity (p < .0001), but for sponges it is the same (p = 0.2182). 
+
+*D*~5~
+
+Gamma GLM with log link
+
+```{r, fig.width = 8, fig.height = 3}
+
+D5.gamma.log <- glm(data = hcx.all, F5 ~ Complexity * Bottom, family = Gamma(link = "log")) 
+
+D5.model <- D5.gamma.log
+
+summary(D5.model)
+
+# residuals
+
+par(mfrow = c(1, 3)) 
+plot(resid(D5.model)) 
+hist(residuals(D5.model))
+qqnorm(residuals(D5.model))
+qqline(residuals(D5.model))
+
+# post hoc
+
+summary(emmeans(D5.model, pairwise ~ Bottom | Complexity ), adjust = "bonferroni")
+summary(emmeans(D5.model, pairwise ~ Complexity | Bottom ), adjust = "bonferroni")
+
+```
+
+Data here is overdispersed, that is, there is a lot of variation. At low complexity, no difference between coral- and sponge-dominated quadrats (p = 0.2420). At high complexity, corals have a higher value of *D*~5~ than sponges (p = 0.0009). Also, *D*~5~ increases from low- to high-complexity for coral quadrats (p < .0001), whereas it is the same for sponges (0.9930). This is a Gamma regression.
+
+# Plot them all together
+
+```{r, fig.width = 8, fig.height = 6}
+
+short.frame <- hcx.all %>% dplyr::select(
+  Bottom:F5, - Rugosity.SD, -K.SD, Complexity
+)
+
+melt.frame <- melt(short.frame, id.vars = list("Bottom", "Complexity"))
+
+melt.frame$Complexity <- gsub("L", "Low", melt.frame$Complexity)
+melt.frame$Complexity <- factor(gsub("H", "High", melt.frame$Complexity), levels = c("Low", "High"))
+
+
+
+all.boxes <- ggplot(data = melt.frame, aes(x = Complexity, y = value))+
+  geom_boxplot(aes(fill = Bottom, color = Bottom), alpha = 0.7, width = 0.5)+  
+  scale_fill_manual(values = c("firebrick", "dodgerblue"))+
+  scale_color_manual(values = c("firebrick", "dodgerblue"))+
+  #labs(y = expression(paste(italic("D"), sep = "")))+
+  theme_bw()+
+  theme(panel.grid = element_blank())+
+  facet_wrap(~ variable, scales = "free")+
+  theme(strip.background = element_blank())
+all.boxes
+
+```

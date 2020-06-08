@@ -1,0 +1,376 @@
+---
+title: "Habitat complexity part 3. Constrained ordination."
+author: "Alberto Rovellini"
+date: "18 March 2020"
+output:
+  html_document:
+    code_folding: hide
+    toc: yes
+    toc_float: yes
+  pdf_document:
+    toc: yes
+---
+
+This document produces a distance matrix based on measures of structural complexity, and then applies unconstrained and constrained ordination methods nMDS, permutational MANOVA and CAP (Anderson 2001, Anderson and Willis 2003). This analysis is based on an euclidean matrix calculated for the multivariate matrix *X* containing values of the model-derived metrcis *R*, 1/*k*, and *D*~1-5~.
+
+```{r, echo = FALSE, include=FALSE, warning = FALSE}
+knitr::opts_chunk$set(echo = TRUE, width = 150)
+```
+
+```{r, message = FALSE, warning = FALSE}
+
+library(readxl)
+library(data.table)
+library(ggplot2)
+library(abind)
+library(dplyr)
+library(reshape2)
+library(RColorBrewer)
+library(emmeans)
+library(ggfortify)
+library(vegan)
+library(BiodiversityR)
+library(ggvegan)
+library(cluster)
+library(factoextra)
+library(magrittr)
+
+```
+
+Read in cover data.
+
+```{r}
+
+cover <- read.csv(".../coverNew.csv")
+
+```
+
+Merge in results of the 3D models. This contains the model-derived structural metrics (*R*, 1/*k*, *D*~1, *D*~2, *D*~3, *D*~4, *D*~5).
+
+```{r}
+
+hcx <- read.csv(".../hcxNew.csv")
+
+hcx.add <- hcx %>% dplyr::select(Rugosity.AV:lnS6)
+n.times <- length(levels(droplevels(cover$Long_group))) # find number of times one row og hcx must be replicated to fit with cover
+
+hcx.add <- hcx.add[rep(seq_len(nrow(hcx.add)), each = n.times),] # inflate hcx
+
+cover.hcx <- cbind(cover, hcx.add) # stitch
+
+```
+
+Here we build a distance matrix on the structural properties. Original matrix is multivariate and therefore a standardisation is a good idea.
+
+## Model-derived metrics.
+
+```{r, fig.width = 6, fig.height = 5}
+
+hcx.matrix <- hcx %>% dplyr::select(
+  Rugosity.AV, K.AV, F1:F5
+) %>% mutate_all(
+  funs(scale) # standardises the multivariate matrix
+)
+
+rownames(hcx.matrix) <- hcx$Label
+
+distmat <- vegdist(hcx.matrix, method = "euclidean") # non standardised, eculidean space
+
+fviz_dist(distmat, 
+   gradient = list(low = "firebrick", mid = "white", high = "dodgerblue")) # this visualises the whole distance matrix 
+
+```
+
+Get appropriate number of *k* dimensions. That is, make sure that k = 2 is below a stress level of 0.2.
+
+```{r, fig.width = 4, fig.height = 3, eval = FALSE}
+
+dim <- 10
+stressList <- vector(mode = "list", length = length(dim))
+
+for (i in 1:dim) {
+  fitTemp <- metaMDS(distmat, k = i, engine = "monoMDS")
+  stressList[[i]] <- fitTemp$stress
+}
+
+stressVec <- unlist(stressList)
+
+screeFrame <- data.frame(1:10, stressVec)
+
+scree <- ggplot(data = screeFrame, aes(x = X1.10, y = stressVec))+
+  geom_point()+
+  geom_abline(intercept = 0.2, slope = 0, colour = "red")+
+  theme_bw()+
+  theme(panel.grid = element_blank())
+scree
+
+```
+
+Fit non-metric Multidimensional Scaling.
+
+```{r}
+
+# always make sure that the method converges
+
+fit <- metaMDS(distmat, k = 2, engine = "monoMDS", maxit = 1000) # this is a ***NON-METRIC*** MDS plot based on euclidean distances.
+
+distances <- as.data.frame(fit$points)
+distances$Names <- as.character(rownames(distances))
+
+distances <- distances %>% dplyr::mutate(
+  # Site       = substr(Names, 1, 2),
+  Bottom     = substr(Names, 1, 1),
+  Complexity = substr(Names, 2, 2)
+)
+
+```
+
+```{r, fig.width = 5, fig.height = 4}
+
+mds.all <- ggplot(data = distances, aes(x = MDS1, y = MDS2))+
+  geom_vline(xintercept = 0, linetype = "dashed")+
+  geom_hline(yintercept = 0, linetype = "dashed")+
+  geom_point(aes(colour = Complexity, shape = Bottom), size = 3)+
+  scale_color_manual(values = c("firebrick", "dodgerblue"))+
+  theme_bw()+
+  theme(panel.grid = element_blank())
+
+mds.all
+
+```
+
+The above is for visualisation of how things look like as a whole. Evident separation of complexity groups.
+
+# Separate the groups
+
+## Corals
+
+Start from corals.
+
+### Non-metric MDS
+
+```{r}
+
+# prepare distance matrix Y
+
+hcx.matrix.coral <- hcx.matrix[-grep("S", rownames(hcx.matrix)),]
+
+diss.mat.coral <- vegdist(hcx.matrix.coral, method = "euclidean")
+
+fit <- metaMDS(diss.mat.coral, k = 2, engine = "monoMDS", maxiter = 100) # this is a ***NON-METRIC*** MDS plot based on euclidean distances
+
+distances <- as.data.frame(fit$points)
+distances$Names <- as.character(rownames(distances))
+
+distances <- distances %>% dplyr::mutate(
+  Bottom     = substr(Names, 1, 1),
+  Complexity = substr(Names, 2, 2)
+)
+
+```
+
+Plot it.
+
+```{r, fig.width = 5, fig.height = 4}
+
+ggplot(data = distances, aes(x = MDS1, y = MDS2))+
+  geom_vline(xintercept = 0, linetype = "dashed")+
+  geom_hline(yintercept = 0, linetype = "dashed")+
+  geom_point(aes(colour = Complexity), size = 3)+
+  geom_text(aes(label = Names))+
+  scale_color_manual(values = c("firebrick", "dodgerblue"))+
+  theme_bw()+
+  theme(panel.grid = element_blank())
+
+```
+
+This essentially reiterates the points of the cluster analysis.
+
+### Redundancy analysis
+
+From help page of function vegan::capscale(), we read that capscale() called on an euclidean matrix is equivalent to rda(), which is a call to Redundancy Analysis (Legendre and Legendre 2012). Redundancy Analysis tests for the effects of a set of environmental explanatory variables on a distance matrix (generalized case of a community matrix). So essentially it is the same thing as a CAP (Anderson and Willis 2003), but it is called on an euclidean distance matrix instead of a Bray-Curtis or the likes.
+
+```{r, fig.width = 5, fig.height = 4}
+
+# prepare data matrix X
+
+cover.matrix <- read.csv(".../coverShortFormat.csv")
+cover.matrix$X <- hcx$Label
+
+rownames(cover.matrix) <- cover.matrix$X
+
+cover.coral <- cover.matrix[-which(grepl("S", rownames(cover.matrix))), -1]
+
+# run Redundancy Analysis
+
+rda.coral <- rda(hcx.matrix.coral ~ LCBRA + LCTAB + LCFOL + LCMAS + LCSUB + LCENC + LCFRL, data = cover.coral, distance = "euclidean", add = T)
+
+components <- fortify(rda.coral)
+
+# plot(CAPall)
+# 
+# autoplot(CAPall, layers = c("species", "biplot", "sites"), geom = c("text", "point"))+
+#   geom_vline(xintercept = 0, linetype = "dashed")+
+#   geom_hline(yintercept = 0, linetype = "dashed")+
+#   theme_bw()+
+#   theme(panel.grid = element_blank()) 
+
+rda.coral.plot <- ggplot()+
+  geom_vline(xintercept = 0, linetype = "dashed")+
+  geom_hline(yintercept = 0, linetype = "dashed")+
+  geom_point(data = components[components$Score == "species",], 
+            aes(x = RDA1, y = RDA2), size = 1, color = "grey20")+
+  geom_segment(data = components[components$Score == "biplot",], aes(x = 0, y = 0, xend = RDA1, yend = RDA2),
+               color = "grey")+
+  geom_text(data = components[components$Score == "constraints",], 
+            aes(x = RDA1, y = RDA2, label = components[components$Score == "constraints",]$Label), size = 2.5, color = "dodgerblue")+
+  geom_text(data = components[components$Score == "species",], 
+            aes(x = RDA1, y = RDA2, label = components[components$Score == "species",]$Label), size = 4, color = "grey20")+
+  geom_text(data = components[components$Score == "biplot",], 
+            aes(x = RDA1, y = RDA2, label = components[components$Score == "biplot",]$Label), 
+            size = 3.3, color = "firebrick")+
+  
+  theme_bw()+
+  labs(x = "RDA1", y = "RDA2")+
+  theme(panel.grid = element_blank())
+rda.coral.plot
+
+```
+
+### ANOVA permutational test
+
+This is identical to an adonis() call (that is, a permutational MANOVA as in Anderson 2001), but it is called on an euclidean distance matrix. It is called on the output of rda() with a call to vegan::anova.cca(), and it evaluates model terms (the RHS of the formula in rda()) sequentially, just like in adonis().
+
+```{r}
+
+set.seed(42) # important for a permutational method
+
+# run permutation test on sequentially added terms 
+
+anova.cca(rda.coral, permutations = 999, by = "terms") # this includes only the coral groups. Which morphogroups best explain the variation in the structural metrics space? We keep only coral groups because quadrats are coral dominated, and too many variables make it confusing.
+
+(anova.cca(rda.coral, permutations = 999, by = "terms")$Variance[1]/sum(anova.cca(rda.coral, permutations = 999, by = "terms")$Variance)) * 100
+(anova.cca(rda.coral, permutations = 999, by = "terms")$Variance[4]/sum(anova.cca(rda.coral, permutations = 999, by = "terms")$Variance)) * 100
+
+```
+
+The amount of branching and massive corals seems to be the most important to explain the overall structural properties of a quadrat. Branching corals explain 48% of the variation in the structural metrics (p = 0.001), tabular corals a non-significant 7.6% (p = 0.063), and massive corals a further 17.6% (p = 0.002).
+
+## Sponges
+
+### Non-metric MDS
+
+```{r}
+
+# prepare distance matrix Y
+
+hcx.matrix.sponge <- hcx.matrix[grep("S", rownames(hcx.matrix)),]
+
+diss.mat.sponge <- vegdist(hcx.matrix.sponge, method = "euclidean")
+
+fit <- metaMDS(diss.mat.sponge, k = 2, engine = "monoMDS", maxiter = 100) # this is a ***NON-METRIC*** MDS plot based on euclidean distances
+
+distances <- as.data.frame(fit$points)
+distances$Names <- as.character(rownames(distances))
+
+distances <- distances %>% dplyr::mutate(
+  Bottom     = substr(Names, 1, 1),
+  Complexity = substr(Names, 2, 2)
+)
+
+```
+
+Plot it.
+
+```{r, fig.width = 5, fig.height = 4}
+
+ggplot(data = distances, aes(x = MDS1, y = MDS2))+
+  geom_vline(xintercept = 0, linetype = "dashed")+
+  geom_hline(yintercept = 0, linetype = "dashed")+
+  geom_point(aes(colour = Complexity), size = 3)+
+  geom_text(aes(label = Names))+
+  scale_color_manual(values = c("firebrick", "dodgerblue"))+
+  theme_bw()+
+  theme(panel.grid = element_blank())
+
+```
+
+Also nicely divided.
+
+### Redundancy analysis
+
+```{r, fig.width = 5, fig.height = 4}
+
+set.seed(42)
+
+# prepare distance matrix Y
+
+hcx.matrix.sponge <- hcx.matrix[grep("S", rownames(hcx.matrix)),]
+
+# prepare data matrix X
+
+cover.sponge <- cover.matrix[which(grepl("S", rownames(cover.matrix))), -1]
+
+# run Redundancy Analysis
+
+rda.sponge <- rda(hcx.matrix.sponge ~ SGBAR + SGTUB + SGBRA + SGREP + SGFOL + SGMAS + SGCUS + SGDIG + SGENC + SGGLO, data = cover.sponge, distance = "euclidean", add = T)
+
+components <- fortify(rda.sponge)
+
+# plot(rda.sponge)
+# 
+# autoplot(CAPall, layers = c("species", "biplot", "sites"), geom = c("text", "point"))+
+#   geom_vline(xintercept = 0, linetype = "dashed")+
+#   geom_hline(yintercept = 0, linetype = "dashed")+
+#   theme_bw()+
+#   theme(panel.grid = element_blank()) 
+
+rda.sponge.plot <- ggplot()+
+  geom_vline(xintercept = 0, linetype = "dashed")+
+  geom_hline(yintercept = 0, linetype = "dashed")+
+  geom_point(data = components[components$Score == "species",], 
+            aes(x = RDA1, y = RDA2), size = 1, color = "grey20")+
+  geom_segment(data = components[components$Score == "biplot",], aes(x = 0, y = 0, xend = RDA1, yend = RDA2),
+               color = "grey")+
+  geom_text(data = components[components$Score == "constraints",], 
+            aes(x = RDA1, y = RDA2, label = components[components$Score == "constraints",]$Label), size = 2.5, color = "dodgerblue")+
+  geom_text(data = components[components$Score == "species",], 
+            aes(x = RDA1, y = RDA2, label = components[components$Score == "species",]$Label), size = 4, color = "grey20")+
+  geom_text(data = components[components$Score == "biplot",], 
+            aes(x = RDA1, y = RDA2, label = components[components$Score == "biplot",]$Label), size = 3.3, color = "firebrick")+
+  
+  theme_bw()+
+  labs(x = "RDA1", y = "RDA2")+
+  theme(panel.grid = element_blank())
+rda.sponge.plot
+
+```
+
+Situation is not as clear for sponges as for corals.
+
+### ANOVA permutational test
+
+```{r}
+
+set.seed(42)
+
+# run permutation test on sequentially added terms 
+
+anova.cca(rda.sponge, permutations = 999, by = "terms")
+
+# get amount of variance explained
+
+(anova.cca(rda.sponge, permutations = 999, by = "terms")$Variance[1]/sum(anova.cca(rda.sponge, permutations = 999, by = "terms")$Variance))*100
+
+```
+
+Barrel morphology seems to be the only one that explains overall variation between sponge-dominated quadrats (20%, p = 0.008). Using less morphs does not seem to make any difference here.
+
+# Summary
+
+If we use unconstrained (nMDS) and constrained (CAP) ordination methods to disclose patterns within the data, we see that plots divide nicely between high- and low-complexity quadrats in the structural complexity space. Constrained ordination based on the *a priori* hypothesis that percentage cover of the benthic morphologies has an effect on the structural properties of the quadrats showed that morphological properties of coral-dominated quadrats are largely determined by the abundance of branching and massive corals. The situation is not as clear for sponges, where barrel growth forms explain the largest variation in how the samples are scattered in the complexity space.
+
+# __Important__
+
+This is omitted from the code to save space, but Redundancy Analysis and permutational ANOVA performed on coral-dominated quadrats by using sponge morphs percentage cover showed that *none* of the sponge morphs explains any significant amount of variance in the overall structural complexity of coral quadrats. The same applies the other way around. Therefore, if we combine this information with the fact that in terms of cover dominant groups are indeed dominant, we can use only coral morphs for coral-related modelling, and only sponge morphs for sponge-related modelling. 
+

@@ -1,0 +1,197 @@
+---
+title: "Habitat complexity part 1. Group clustering"
+author: "Alberto Rovellini"
+date: "18 March 2020"
+output:
+  html_document:
+    code_folding: hide
+    toc: yes
+    toc_float: yes
+  pdf_document:
+    toc: yes
+---
+
+This document produces a distance matrix based on measures of structural complexity, and then applies cluster analysis. This document then parts the quadrats into high and low complexity based on the structural complexity metrics.
+
+```{r, echo = FALSE, include=FALSE, warning = FALSE}
+knitr::opts_chunk$set(echo = TRUE, width = 150)
+```
+
+```{r, message = FALSE, warning = FALSE}
+
+library(readxl)
+library(data.table)
+library(ggplot2)
+library(abind)
+library(dplyr)
+library(reshape2)
+library(RColorBrewer)
+library(emmeans)
+library(ggfortify)
+library(vegan)
+library(BiodiversityR)
+# library(ggvegan)
+library(cluster)
+library(factoextra)
+library(magrittr)
+
+```
+
+Read in cover data.
+
+```{r}
+
+cover <- read.csv(".../cover.csv")
+
+```
+
+Merge in results of the 3D models. This contains the model-derived structural metrics (*R*, 1/*k*, *D*~1, *D*~2, *D*~3, *D*~4, *D*~5).
+
+```{r}
+
+hcx <- read.csv(".../hcx_start.csv")
+
+hcx.add <- hcx %>% dplyr::select(Rugosity.AV:lnS6)
+n.times <- length(levels(droplevels(cover$Long_group))) # find number of times one row og hcx must be replicated to fit with cover
+
+hcx.add <- hcx.add[rep(seq_len(nrow(hcx.add)), each = n.times),] # inflate hcx
+
+cover.hcx <- cbind(cover, hcx.add) # stitch
+
+```
+
+Here we build a distance matrix on the structural properties. We standardize the initial multivariate matrix.
+
+## Model-derived metrics.
+
+```{r, fig.width = 6, fig.height = 5}
+
+hcx.matrix <- hcx %>% dplyr::select(
+  Rugosity.AV, K.AV, F1:F5
+) %>% mutate_all(
+  funs(scale)
+)
+
+scale(hcx$Rugosity.AV)
+
+rownames(hcx.matrix) <- hcx$Quadrat
+
+distmat <- vegdist(hcx.matrix, method = "euclidean") # eculidean space
+
+fviz_dist(distmat, 
+   gradient = list(low = "firebrick", mid = "white", high = "dodgerblue")) # this visualises the whole distance matrix
+
+```
+
+### Cluster analysis
+
+This is based on the matrix of the euclidean distances derived from the the multivariate matrix *X* of model-derived structural complexity metrics *R*, 1/*k*, *D*~1-5~. The multivariate matrix is first standardised (for each x~ij~ value of *X*, (x~ij~-colmean)/colsd), so that all columns are on the same scale. Then agglomerative hierarchical cluster analysis with Ward's method (Ward 1963, Murtagh and Legendre 2014) is applied. 
+
+## Corals
+
+```{r, fig.width = 5, fig.height = 4.5}
+
+# prepare distance matrix Y
+
+hcx.matrix.coral <- hcx.matrix[-grep("S", rownames(hcx.matrix)),]
+
+# prepare data matrix X
+
+cover.matrix <- read.csv(".../coverShortFormat.csv")
+
+rownames(cover.matrix) <- cover.matrix$X
+
+cover.coral <- cover.matrix[-which(grepl("S", rownames(cover.matrix))), -1]
+
+distmat <- dist(hcx.matrix.coral, method = "euclidean") 
+
+coral.clusts <- hclust(distmat, method = "ward.D2") # hierarchical clustering method
+
+coral.dendro <- fviz_dend(coral.clusts, k = 2, k_colors = c("firebrick", "dodgerblue"), rect = TRUE, lwd = 1, horiz = T)
+
+coral.dendro
+
+```
+
+## Sponges
+
+```{r, fig.width = 5, fig.height = 4.5}
+
+# prepare distance matrix Y
+
+hcx.matrix.sponge <- hcx.matrix[grep("S", rownames(hcx.matrix)),]
+
+# prepare data matrix X
+
+cover.sponge <- cover.matrix[which(grepl("S", rownames(cover.matrix))), -1]
+
+distmat <- dist(hcx.matrix.sponge, method = "euclidean") 
+
+sponge.clusts <- hclust(distmat, method = "ward.D2") # hierarchical clustering method
+
+sponge.dendro <- fviz_dend(sponge.clusts, k = 2, k_colors = c("firebrick", "dodgerblue"), rect = TRUE, lwd = 1, horiz = T)
+
+sponge.dendro
+
+```
+
+# Data regrouping
+
+Add the new classification to the quadrats names. 
+
+```{r}
+
+cluster.order.coral <- coral.clusts$labels[coral.clusts$order] # this extracts the order from low to high complexity
+cluster.order.sponge <- sponge.clusts$labels[sponge.clusts$order]
+
+# make vector for coral samples (manually set to 9 as cutoff low-high, as corals are 9 L and 6 H)
+
+cluster.order.coral[1:9] <- paste(substr(cluster.order.coral[1:9], 1, nchar(cluster.order.coral[1:9])-2), "CL", sep = "_")
+cluster.order.coral[10:length(cluster.order.coral)] <- paste(substr(cluster.order.coral[10:length(cluster.order.coral)], 1, nchar(cluster.order.coral[9:length(cluster.order.coral)])-2), "CH", sep = "_")
+
+# make vector for sponge samples (manually set to 9 as cutoff low-high, as sponges are 9 L and 8 H)
+
+cluster.order.sponge[1:9] <- paste(substr(cluster.order.sponge[1:9], 1, nchar(cluster.order.sponge[1:9])-2), "SL", sep = "_")
+cluster.order.sponge[10:length(cluster.order.sponge)] <- paste(substr(cluster.order.sponge[10:length(cluster.order.sponge)], 1, nchar(cluster.order.sponge[9:length(cluster.order.sponge)])-2), "SH", sep = "_")
+
+# concatenate and order them as the original
+
+new.groups <- c(cluster.order.coral, cluster.order.sponge)
+
+new.groups <- sort(new.groups)
+
+# for quadrats 3 and 15 2 "_" are concatenated, unclear why. Manually fix
+
+new.groups <- gsub("__", "_", new.groups)
+
+# also make label vector for plots
+
+labels <- paste(substr(new.groups, nchar(new.groups)-1, nchar(new.groups)), "_", substr(new.groups, 4, 6), sep = "")
+
+```
+
+Add this vector to: cover and hcx. Write out a csv file each.
+
+```{r}
+
+# hcx
+
+hcx <- hcx %>% dplyr::mutate(
+  Quadrat    = new.groups,
+  Label      = labels,
+  Complexity = substr(new.groups, nchar(new.groups), nchar(new.groups))
+)
+
+write.csv(hcx, ".../hcxNew.csv", row.names = FALSE)
+
+# cover
+
+cover <- cover %>% dplyr::mutate(
+  Quadrat    = rep(new.groups, each = length(levels(factor(cover$Long_group)))),
+  Label      = rep(labels, each = length(levels(factor(cover$Long_group)))),
+  Complexity = substr(Quadrat, nchar(Quadrat), nchar(Quadrat))
+) 
+
+write.csv(cover, ".../coverNew.csv", row.names = FALSE)
+
+```

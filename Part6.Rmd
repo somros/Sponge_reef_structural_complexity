@@ -1,0 +1,443 @@
+---
+title: "Habitat complexity Part 6: fish analysis"
+author: "Alberto Rovellini"
+date: "18 March 2020"
+output:
+  html_document:
+    code_folding: hide
+    toc: yes
+    toc_float: yes
+  pdf_document:
+    toc: yes
+---
+
+This document explores differences in abundance and species composition of the fish assemblage associated with a sub-set of the 2x2 m quadrats used for the structural complexity analysis. For 15 of the 32 quadrats, GoPros recorded the fish activity at the quadrats. Cameras recorded ~15 to ~40 minutes videos, while divers moved on to work on other quadrats. Videos were broken down into 30-seconds segments. For each 30-seconds segment, abundance of each fish species was measured as the highest number of individuals of that species that were observed in the quadrat at the same time.
+
+Fish abundance for each species for each quadrat was expressed by the average of the values measured in each 30-seconds segment. Because we observed large differences in fish abundance between gregarious fishes (for example many damselfishes) and solitary species, fish abundance was then fourth root-transformed. 
+
+__NOTE:__ GLMs were fitted with depth as predictor (with Bottom and Complexity) at first. Including depth as predictors in the GLMs is not possible because coral- and sponge-dominated high-complexity quadrats are not represented across depths. See main text and Supplementary material for discussion.
+
+```{r, echo = FALSE, include=FALSE, warning = FALSE}
+knitr::opts_chunk$set(echo = TRUE, width = 150)
+```
+
+```{r, message = FALSE, warning = FALSE}
+
+library(readxl)
+library(data.table)
+library(ggplot2)
+library(abind)
+library(dplyr)
+library(reshape2)
+library(RColorBrewer)
+library(vegan)
+library(BiodiversityR)
+# library(ggvegan)
+# library(betareg)
+library(emmeans)
+
+```
+
+# Community matrix
+
+Starts from fish data from Albi and Charli, which have different structures and identify different species.
+
+Read in Albi's data, and produce a community matrix. This community matrix has a transposed structure compared to traditional community data, that is, it has species as rows and quadrats as columns. Reason for that is that this makes it a lot easier to meld with Charli's data later.
+
+```{r}
+
+sheets <- excel_sheets(".../Fish_data_AR.xlsx") # read the names of all the sheets
+
+# prepare function to read the sheets and calculate the means 
+
+data.processer <- function(x) {
+  data.quadrat <- read_xlsx(path = ".../Fish_data_AR.xlsx", sheet = x)
+  data.quadrat <- as.data.frame(data.quadrat)
+  row.names(data.quadrat) <- data.quadrat[,1]
+  data.quadrat <- data.quadrat[,-1]
+  data.quadrat[is.na(data.quadrat)] <- 0 # replaces NAs with 0
+  for(i in 1:nrow(data.quadrat)) { # if species is absent from more than x % of segments (i.e. if it appears in less than (100-x)% of the segments), consider it absent from the video (i.e. replace all occurrences with 0's)
+    if(length(which(data.quadrat[i,] == 0)) > length(data.quadrat[i,]) * 1.0) { # this only keeps things that appear in 0-1 proportion
+      data.quadrat[i,] <- rep(0, length(data.quadrat[i,]))
+    } 
+  }
+  mean.counts <- rowMeans(data.quadrat) # gets the means
+  return(mean.counts)
+}
+
+# apply the function
+
+mean.list <- lapply(sheets, data.processer)
+
+matrix.albi <- data.frame(bind_cols(mean.list)) # bind all the quadrat means
+
+# change column names
+
+colnames(matrix.albi) <- sheets
+
+# change row names
+
+rownames(matrix.albi) <- names(mean.list[[1]])
+
+```
+
+Read and process Charli's data.
+
+```{r}
+
+charli.sheets <- excel_sheets(".../Fish_data_CM.xlsx")
+
+# need to come up with list of all species names to identify duplicates etc. This will also have to be compared to my species list
+
+data.charli <- function(x) {
+  data.quadrat <- read_xlsx(path = ".../Fish_data_CM.xlsx", sheet = x)
+  data.quadrat <- as.data.frame(data.quadrat)
+  
+  # drop first 3 columns
+  
+  data.quadrat <- data.quadrat[,-c(1:3)]
+  
+  # transpose
+  
+  data.transpose <- t(data.quadrat)
+  
+  # order alphabetically
+  
+  data.transpose <- data.transpose[order(row.names(data.transpose)),]
+
+  # carry on with previous function
+  
+  for(i in 1:nrow(data.transpose)) { # if one occurrence of one individual in the entire video, turns all to 0 so that they can be removed afterwards. could be more restrictive
+    if(length(which(data.transpose[i,] == 0)) > length(data.transpose[i,]) * 1.0) { # this only keeps things that appear in 0-1 proportion
+      data.transpose[i,] <- rep(0, length(data.transpose[i,]))
+    } 
+  }
+  mean.counts <- rowMeans(data.transpose) # return means by row
+  return(mean.counts)
+}
+
+means.charli <- lapply(charli.sheets, data.charli) # mean values per species per quadrat from charli's data
+
+```
+
+Compile new matrices for each quadrat containing all species found in Charli's data. Purpose is to bind all sheets from Charli's workbook into one dataframe with a consistent species list.
+
+```{r}
+
+# Write out long list of all species - will be the rows
+
+all.species.charli <- levels(factor(unlist(lapply(means.charli, names))))
+
+# have the columns - 
+
+quadrats.charli <- charli.sheets
+
+# write an empty matrix
+
+matrix.charli <- matrix(NA, nrow = length(all.species.charli), ncol = length(quadrats.charli))
+
+# fill the matrix
+
+for (i in 1:length(all.species.charli)) {
+  for (j in 1:length(quadrats.charli)) {
+    if (all.species.charli[i] %in% names(means.charli[[j]])) {
+    matrix.charli[i,j] <- means.charli[[j]][which(names(means.charli[[j]]) == all.species.charli[i])]
+    } else {
+     matrix.charli[i,j] <- 0 
+    }
+  }
+}
+
+rownames(matrix.charli) <- all.species.charli
+
+colnames(matrix.charli) <- quadrats.charli
+
+# turn into data frame
+
+matrix.charli <- as.data.frame(matrix.charli)
+
+```
+
+Combine my data with Charli's. Write out a species list from my data, a species list from Charli's data, merge, and do a similar filling routine to the above. Start from a matrix with names as rows, then transpose it.
+
+```{r}
+
+# matrix rows
+
+all.species.albi <- rownames(matrix.albi)
+
+all.species <- levels(factor(c(all.species.albi, all.species.charli)))
+
+# matrix columns
+
+all.quadrats <- c(colnames(matrix.albi), colnames(matrix.charli))
+
+# write empty matrix
+
+community.matrix.vertical <- matrix(NA, nrow = length(all.species), ncol = length(all.quadrats))
+
+# rename rows and column
+
+rownames(community.matrix.vertical) <- all.species
+colnames(community.matrix.vertical) <- all.quadrats
+
+# fill the matrix
+
+for (i in 1:length(all.species)) {
+  for (j in 1:length(all.quadrats)) {
+    if (all.species[i] %in% all.species.albi & all.quadrats[j] %in% colnames(matrix.albi)) {
+      community.matrix.vertical[i,j] <- matrix.albi[which(rownames(matrix.albi) == all.species[i]),
+                                             which(colnames(matrix.albi) == all.quadrats[j])]
+    } else if (all.species[i] %in% all.species.charli & all.quadrats[j] %in% colnames(matrix.charli)) {
+      community.matrix.vertical[i,j] <- matrix.charli[which(rownames(matrix.charli) == all.species[i]),
+                                             which(colnames(matrix.charli) == all.quadrats[j])]
+    }
+  }
+}
+
+community.matrix.vertical[is.na(community.matrix.vertical)] <- 0
+
+# transpose
+
+community.matrix <- t(community.matrix.vertical)
+
+community.matrix <- community.matrix[order(row.names(community.matrix)),]
+
+# drop all empty columns
+
+community.matrix <- community.matrix[,-which(colSums(community.matrix) == 0)]
+
+# write.csv(colnames(community.matrix), "speciesTMP2.csv", row.names = F, col.names = F)
+
+```
+
+Final product of this is a community matrix with my data and Charli's data, with quadrats as rows and samples as columns.
+
+# Univariate analysis
+
+Test for differences in total fish abundance and species richness between quadrats. 
+
+Transform the community matrix (log[x+1]) and apply the index.
+
+```{r}
+
+transformed.matrix <- log(community.matrix + 1)
+
+```
+
+## Abundance
+
+Calculate total fish abundance per quadrat (as the sum of all fish abundances) and test for the effects of Complexity and Bottom on it. 
+
+```{r}
+
+used.matrix <- transformed.matrix # define here which matrix you want to use from here on out
+
+total.abundance <- rowSums(used.matrix) # calculate total fish abundance
+
+quadrats <- names(total.abundance)
+
+fish.abundance <- data.frame(Quadrat = quadrats,
+                             Bottom  = substr(quadrats, nchar(quadrats)-1, nchar(quadrats)-1),
+                             Complexity = substr(quadrats, nchar(quadrats), nchar(quadrats)),
+                             Abundance = total.abundance)
+```
+
+Visualise differences in total fish abundance.
+
+```{r, fig.width = 5, fig.height = 3.5}
+
+# reorder factors
+
+fish.abundance$Bottom <- factor(fish.abundance$Bottom, levels = c("C", "S"))
+fish.abundance$Complexity <- factor(fish.abundance$Complexity, levels = c("L", "H"))
+
+ggplot(data = fish.abundance, aes(x = Complexity, y = Abundance, fill = Bottom))+
+  geom_boxplot(aes(fill = Bottom))
+
+ggplot(data = fish.abundance, aes(Abundance))+
+  geom_density() # suggests Gamma glm with log-link
+
+```
+
+Model the effects of Complexity and Bottom on total fish abundance. Use generalised linear models (GLMs) that do not assume normal distribution of the errors. The distribution of the response varibale Abundance suggests to use a Gamma model with log-link.
+
+```{r, fig.height = 3, fig.width = 9}
+
+abundance.model <- glm(data = fish.abundance, Abundance ~ Bottom * Complexity, family = Gamma(link = "log"))
+
+summary(abundance.model) # no bottom, no complexity
+
+par(mfrow = c(1, 3))
+plot(resid(abundance.model))
+hist(resid(abundance.model))
+qqnorm(resid(abundance.model))
+qqline(resid(abundance.model))
+
+summary(emmeans(abundance.model, pairwise ~ Bottom | Complexity ), adjust = "bonferroni")
+summary(emmeans(abundance.model, pairwise ~ Complexity | Bottom ), adjust = "bonferroni")
+
+```
+
+No differences detected from the GLM of Gamma family and log-link in fish abundance between C-S and H-L.
+
+## Richness 
+
+```{r}
+
+# derive richness and total transformed abundance
+
+richness <- specnumber(x = used.matrix)
+abundance <- total.abundance
+
+diversity.metrics <- as.data.frame(cbind(abundance, richness))
+
+quadrats <- rownames(diversity.metrics)
+
+diversity.metrics <- diversity.metrics %>% dplyr::mutate(
+  Quadrat    = substr(quadrats, 4, 6),
+  Bottom     = substr(quadrats, nchar(quadrats)-1, nchar(quadrats)-1),
+  Complexity = substr(quadrats, nchar(quadrats), nchar(quadrats))
+)
+
+```
+
+Visualisation of the indices.
+
+```{r, fig.width = 10, fig.height = 4.5}
+
+diversity.long <- melt(diversity.metrics, id.vars = list("Quadrat", "Bottom", "Complexity"))
+
+diversity.long$Bottom <- factor(diversity.long$Bottom, levels = c("C", "S"))
+diversity.long$Complexity <- factor(diversity.long$Complexity, levels = c("L", "H"))
+
+# plot the indeces as boxplots
+
+fish.plot <- ggplot(data = diversity.long, aes(x = Complexity, y = value, fill = Bottom))+
+  geom_boxplot(aes(fill = Bottom, color = Bottom), alpha = 0.7, width = 0.5)+
+  scale_fill_manual(values = c("firebrick", "dodgerblue"))+
+  scale_color_manual(values = c("firebrick", "dodgerblue"))+
+  theme_bw()+
+  theme(panel.grid = element_blank())+
+  facet_wrap(~ variable, scales = "free", ncol = 4)+
+  theme(
+  strip.background = element_blank()
+)
+
+fish.plot
+
+# ggsave(".../fish.plot.pdf", fish.plot, width = 4, height = 3)
+
+
+```
+
+```{r, fig.width = 10, fig.height = 4}
+
+ggplot(data = diversity.long[diversity.long$variable != "abundance",], aes(value))+
+  geom_density()+
+  facet_wrap(~ variable, scales = "free")
+
+```
+
+Richness has right-skewed distribution. Apply GLM with Gamma log-link.
+
+```{r, fig.height = 3, fig.width = 9}
+
+richness.model <- glm(data = diversity.metrics, richness ~ Bottom * Complexity, family = Gamma(link = "log"))
+
+summary(richness.model) # effect of bottom
+
+# residuals
+
+par(mfrow = c(1, 3))
+plot(resid(richness.model))
+hist(resid(richness.model))
+qqnorm(resid(richness.model))
+qqline(resid(richness.model))
+
+# post hoc
+
+summary(emmeans(richness.model, pairwise ~ Bottom | Complexity ), adjust = "bonferroni")
+summary(emmeans(richness.model, pairwise ~ Complexity | Bottom ), adjust = "bonferroni")
+
+```
+
+Post-hoc tests show that at high complexity coral-dominated quadrats support higher species richness than sponge-dominated quadrats (p = 0.0265). 
+
+# Multivariate analysis
+
+Does species composition of the assemblage change between sponge-dominated and coral-dominated quadrats, and between high- and low-complexity quadrats? Base the following on a Bray-Curtis matrix.
+
+## nMDS
+
+```{r, fig.width = 5, fig.height = 4}
+
+set.seed(42)
+
+fish.mds <- metaMDS(comm = used.matrix, distance = "bray", k = 2, try = 100, trymax = 1000) # 171 runs, stress = 0.167
+
+distances <- as.data.frame(fish.mds$points)
+distances$Names <- rownames(distances)
+
+distances <- distances %>% dplyr::mutate(
+  Bottom     = substr(Names, nchar(Names)-1, nchar(Names)-1),
+  Complexity = substr(Names, nchar(Names), nchar(Names))
+)
+
+nmds.fish <- ggplot(data = distances, aes(x = MDS1, y = MDS2))+
+  geom_point(aes(color = Bottom, shape = Complexity), size = 3)+
+  scale_color_manual(values = c("firebrick1", "dodgerblue"))+
+  geom_vline(xintercept = 0, linetype = "dashed")+
+  geom_hline(yintercept = 0, linetype = "dashed")+
+  theme_bw()+
+  theme(panel.grid = element_blank())
+
+nmds.fish
+
+```
+
+Some degree of separation between coral-dominated and sponge-dominated quadrats, especially if one focuses on the high-complexity quadrats. No separation between complexity metrics.
+
+## PERMANOVA
+
+Do dominant benthic organisms and levels of complexity predict community structure, with community data based on fish abundance data?
+
+```{r}
+
+# read-in hcx 
+
+hcx <- read.csv(".../hcxNew.csv")
+
+# subset to quadrats we have fish data for
+
+hcx.fish <- hcx[hcx$Quadrat %in% rownames(used.matrix),]
+
+set.seed(42)
+
+adonis(used.matrix ~ Bottom * Complexity, data = hcx.fish, permutation = 999)
+
+```
+
+Type of dominant organism (sponge vs coral) explains 15% of the variation in the fish assemblage composition (p = 0.002).
+
+## Similarity percentages (SIMPER).
+
+Importantly, "the results of simper can be very difficult to interpret. The method very badly confounds the mean between group differences and within group variation, and seems to single out variable species instead of distinctive species (Warton et al. 2012). Even if you make groups that are copies of each other, the method will single out species with high contribution, but these are not contributions to non-existing between-group differences but to within-group variation in species abundance."
+
+Therefore we limit this analysis to the high-complexity quadrats.
+
+```{r}
+
+simper.matrix <- used.matrix[which(grepl("H", rownames(community.matrix))),] # subsets to the matrix of only the high-complexity quadrats
+
+simper.quadrats <- rownames(simper.matrix)
+
+key.factors <- data.frame(simper.quadrats = simper.quadrats,
+                          Bottom   = substr(simper.quadrats, nchar(simper.quadrats)-1, nchar(simper.quadrats)-1),
+                          Complexity = substr(simper.quadrats, nchar(simper.quadrats), nchar(simper.quadrats)))
+
+simper.frame <- summary(simper(comm = simper.matrix, group = key.factors$Bottom, permutations = 999))$S_C
+
+simper.frame
+
+```

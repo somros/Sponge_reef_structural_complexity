@@ -1,0 +1,208 @@
+---
+title: "Habitat complexity part 5a: linkage between cover and structural properties. Corals"
+author: "Alberto Rovellini"
+date: "18 March 2020"
+output:
+  html_document:
+    code_folding: hide
+    toc: yes
+    toc_float: yes
+  pdf_document:
+    toc: yes
+---
+
+This document answers the question: how much do the morphotypes contribute to structural complexity? This is part 1 and it focuses on coral-dominated quadrats (*N* = 15).
+
+```{r, echo = FALSE, include=FALSE, warning = FALSE}
+knitr::opts_chunk$set(echo = TRUE, width = 150)
+```
+
+```{r, message = FALSE, warning = FALSE}
+
+library(data.table)
+library(ggplot2)
+library(abind)
+library(dplyr)
+library(reshape2)
+library(RColorBrewer)
+library(emmeans)
+library(ggfortify)
+library(glmnet)
+
+```
+
+Read in cover data.
+
+```{r}
+
+cover <- read.csv(".../coverNew.csv")
+
+```
+
+Merge in results of the 3D models. This contains the model-derived structural metrics (*R*, 1/*k*, *D*~1~, *D*~2~, *D*~3~, *D*~4~, *D*~5~).
+
+```{r}
+
+hcx <- read.csv(".../hcxNew.csv")
+
+hcx.add <- hcx %>% dplyr::select(Rugosity.AV:lnS6)
+n.times <- length(levels(droplevels(cover$Long_group))) # find number of times one row og hcx must be replicated to fit with cover
+
+hcx.add <- hcx.add[rep(seq_len(nrow(hcx.add)), each = n.times),] # inflate hcx
+
+cover.hcx <- cbind(cover, hcx.add) # stitch
+
+```
+
+## Prepare frames 
+
+Divide sponges from corals. Need to rearrange the all.data frame to have cover of each coral morphology as one variable / column.
+
+```{r}
+
+coral.cover <- cover[cover$Group == "LC" & cover$Type == "Coral",] # keep corals only
+
+coral.morphs <- coral.cover %>% dplyr::select(
+  Morphology, Percent, Quadrat
+)
+
+coral.morphs <- coral.morphs[with(coral.morphs, order(Morphology)),]
+
+n.quadrats <- length(levels(factor(coral.morphs$Quadrat)))
+n.morphs <- length(levels(factor(coral.morphs$Morphology)))
+
+index <- seq(0, nrow(coral.morphs), n.quadrats) + 1
+
+index[length(index)] <- nrow(coral.morphs)
+
+cover.frame <- matrix(NA, ncol = n.morphs, nrow = n.quadrats)
+
+for (i in index[1:length(index)-1]) {
+  cover.frame[,which(index == i)] <- coral.morphs$Percent[i:(i + (n.quadrats - 1))]
+}
+
+cover.frame <- as.data.frame(cover.frame)
+
+colnames(cover.frame) <- levels(factor(coral.morphs$Morphology, levels = unique(coral.morphs$Morphology)))
+
+```
+
+Restrics hcx to the corals, select relevant columns, then bind all together with cover.
+
+```{r}
+
+hcx.coral <- hcx[hcx$Bottom == "HC",]
+
+hcx.coral.short <- hcx.coral %>% dplyr::select(
+  Rugosity.AV, K.AV, F1:F5
+)
+
+all.coral <- cbind(hcx.coral.short, cover.frame)
+
+rownames(all.coral) <- hcx.coral$Quadrat
+
+```
+
+# Linear regression with LASSO regularization
+
+LASSO stands for Least Absolute Shrinkage and Selection Operator, and it is performs variable selection via regularisation. LASSO removes variables from the model by shrinking the coefficients that contribute the most to the variance. LASSO operates by minimizing the sum of the squared residuals (i.e., minimizing the variance) + a penalisation term (lambda) times the slope. The first part is like ordinary regression. The second part, intuitively, forces the coefficient down the bigger lambda is, that is penalises the term if the error is large and lambda is large enough. If lambda is too large, the regression slope shrinks to zero. The weaker the relationship, the closer to 0 the slope is to begin with. 
+
+The goal of the fitting exercise is to derive an appropriate value of lambda that allows to then run the regression and drop unwanted predictors. This is achieved by 10-fold cross-validation within the dataset: that is, the model is trained on a subset of the data (k-1) and tested on the remainder (1) 10 k-times, and each time the error is calculated. An average of the error is then taken ancross the k-folds. 
+
+The bit below uses LASSO regression to select which benthic groups have an effect on each structural variable. Alpha = 1 means full LASSO, whereas alpha = 0 denotes a ridge regression. Values of alpha in between this mean some solution of an elastic net regression, that builds the penalisation term on a blend of LASSO and ridge. LASSO shrinks them to 0. 10-fold cross-validation is used to find the ideal values of lambda, i.e. it is a cross-validation to estimate the model parameters. 
+
+Code below is replicated 100 times (100 random seeds) as CV folds are randomly selected. 
+
+See main text and references therein.
+
+
+```{r}
+
+max.seed <- 100
+
+lasso.list <- vector(mode = "list", length = max.seed)
+
+for (i in 1:max.seed) {
+  
+  set.seed(i) # important for reproducibility
+  
+  X <- all.coral %>% dplyr::select( # this is the input matrix of only percentage cover of the growth forms, i.e. the explanatory variables
+    BRA:TAB
+  ) %>% as.matrix()
+  
+  y1 <- all.coral$Rugosity.AV # this is the dependent variable
+  y2 <- all.coral$K.AV
+  y3 <- all.coral$F1
+  y4 <- all.coral$F2
+  y5 <- all.coral$F3
+  y6 <- all.coral$F4
+  y7 <- all.coral$F5
+  
+  my.alpha <- 1 # this is full LASSO regression
+  
+  # apply LASSO to each dependent variable. This gets appropriate values for lambda, the penalisation coefficient for LASSO
+  
+  # GOAL of cv.glmnet is to estimate lambda by CV!
+  
+  lasso.rugosity <- cv.glmnet(x = X, y = y1, alpha = my.alpha, type.measure = "mse", grouped = F, standardize = F) # drop built-in standardisation
+  lasso.k <- cv.glmnet(x = X, y = y2, alpha = my.alpha, type.measure = "mse", grouped = F, standardize = F)
+  lasso.f1 <- cv.glmnet(x = X, y = y3, alpha = my.alpha, type.measure = "mse", grouped = F, standardize = F)
+  lasso.f2 <- cv.glmnet(x = X, y = y4, alpha = my.alpha, type.measure = "mse", grouped = F, standardize = F)
+  lasso.f3 <- cv.glmnet(x = X, y = y5, alpha = my.alpha, type.measure = "mse", grouped = F, standardize = F)
+  lasso.f4 <- cv.glmnet(x = X, y = y6, alpha = my.alpha, type.measure = "mse", grouped = F, standardize = F)
+  lasso.f5 <- cv.glmnet(x = X, y = y7, alpha = my.alpha, type.measure = "mse", grouped = F, standardize = F)
+  
+  # extracts the coefficients from the LASSO regression models, by using s = lambda.1se
+  
+  # choice of lambda is important: lambda.min is the lambda value that corresponds to the model that returns the minimum misclassification error, whereas lambda.1se corresponds to the lambda of the most highly regularized model (i.e. the most conservative) that is still within one SE from the model defined by lambda.min.
+  
+  lasso.list[[i]] <- rbind(data.frame(Seed = i, Metric = "R", Coeffs = as.matrix(coef(lasso.rugosity, s = "lambda.min"))), 
+                           data.frame(Seed = i, Metric = "k",Coeffs = as.matrix(coef(lasso.k, s = "lambda.min"))), 
+                           data.frame(Seed = i, Metric = "D1",Coeffs = as.matrix(coef(lasso.f1, s = "lambda.min"))), 
+                           data.frame(Seed = i, Metric = "D2",Coeffs = as.matrix(coef(lasso.f2, s = "lambda.min"))), 
+                           data.frame(Seed = i, Metric = "D3",Coeffs = as.matrix(coef(lasso.f3, s = "lambda.min"))), 
+                           data.frame(Seed = i, Metric = "D4",Coeffs = as.matrix(coef(lasso.f4, s = "lambda.min"))), 
+                           data.frame(Seed = i, Metric = "D5",Coeffs = as.matrix(coef(lasso.f5, s = "lambda.min"))), 
+                           make.row.names = F
+  ) %>% dplyr::mutate(
+    Morph = rep(rownames(as.matrix(coef(lasso.rugosity, s = "lambda.min"))), 7)
+  )
+  
+}
+
+lasso.frame <- rbindlist(lasso.list)
+
+lasso.frame <- lasso.frame[lasso.frame$Morph != "(Intercept)"]
+
+lasso.means <- lasso.frame %>% dplyr::group_by(
+  Metric, Morph
+) %>% dplyr::summarise(
+  Mean    = mean(X1),
+  Nonzero = length(X1[X1 != 0]), # how many of the seeds gave a non-zero coefficient?
+  SD      = sd(X1),
+  upper   = Mean + SD,
+  lower   = Mean - SD
+)
+
+```
+
+The below shows how many runs out of 100 returned a non-zero coefficient for each morphology, and the mean of such coefficient. Possibly, only >90% should be considered (arbitrary). Also, consider the standard deviation: if the bar crosses the zero line, discard the variable as it is too inconsistent.
+
+```{r, fig.width = 9, fig.height = 4}
+
+lasso.coral <- ggplot(data = lasso.means, aes(x = Morph, y = Mean))+
+  geom_bar(stat = "identity", fill = "grey70", width = .6)+
+  geom_errorbar(aes(ymax = upper, ymin = lower), width = .2)+
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed")+
+  geom_text(aes(x = Morph, y = Mean/2, label = Nonzero), size = 3.5)+
+  theme_bw()+
+  theme(panel.grid = element_blank(),
+        axis.text.x = element_text(angle = 45, hjust = 1))+
+  ylab(expression(paste("Mean coefficient (at ", lambda["min"], ")")))+
+  facet_wrap(~ Metric, ncol = 4)+
+  theme(strip.background = element_blank())
+  
+lasso.coral
+
+```
+
